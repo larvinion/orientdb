@@ -23,7 +23,7 @@ import com.orientechnologies.orient.core.db.record.ORecordLazyMultiValue;
 import com.orientechnologies.orient.core.metadata.schema.OType;
 import com.orientechnologies.orient.core.record.impl.OBlob;
 import com.orientechnologies.orient.core.record.impl.ODocument;
-import com.orientechnologies.orient.core.sql.functions.ODefaultSQLFunctionFactory;
+import com.orientechnologies.orient.core.sql.OSQLEngine;
 import com.orientechnologies.orient.core.sql.parser.*;
 
 import java.io.ByteArrayInputStream;
@@ -40,16 +40,16 @@ import java.util.*;
  * @author Salvatore Piccione (TXT e-solutions SpA - salvo.picci--at--gmail.com)
  */
 public class OrientJdbcResultSet implements ResultSet {
-  private final List<String> fieldNames;
   private final OrientJdbcResultSetMetaData resultSetMetaData;
+  private final List<String>                fieldNames;
   private List<ODocument> records = null;
   private OrientJdbcStatement statement;
+  private ODocument           document;
   private int cursor   = -1;
   private int rowCount = 0;
-  private ODocument document;
-  private int       type;
-  private int       concurrency;
-  private int       holdability;
+  private int type;
+  private int concurrency;
+  private int holdability;
 
   protected OrientJdbcResultSet(final OrientJdbcStatement statement, final List<ODocument> records, final int type,
       final int concurrency, int holdability) throws SQLException {
@@ -86,7 +86,7 @@ public class OrientJdbcResultSet implements ResultSet {
           "Bad ResultSet Holdability type: " + holdability + " instead of one of the following values: " + HOLD_CURSORS_OVER_COMMIT
               + " or" + CLOSE_CURSORS_AT_COMMIT);
 
-    resultSetMetaData = new OrientJdbcResultSetMetaData(this);
+    resultSetMetaData = new OrientJdbcResultSetMetaData(this, fieldNames);
   }
 
   private List<String> extractFieldNames(OrientJdbcStatement statement) {
@@ -99,7 +99,8 @@ public class OrientJdbcResultSet implements ResultSet {
 
         if (select.getProjection() != null) {
 
-          ODefaultSQLFunctionFactory fc = new ODefaultSQLFunctionFactory();
+          Set<String> functionNames = OSQLEngine.getFunctionNames();
+
           List<OProjectionItem> items = select.getProjection().getItems();
 
           for (OProjectionItem item : items) {
@@ -107,7 +108,9 @@ public class OrientJdbcResultSet implements ResultSet {
             if (!item.isAll()) {
 
               if (item.getAlias() != null) {
-                fields.add(item.getAlias().getStringValue());
+
+                String aliasValue = item.getAlias().getStringValue();
+                fields.add(aliasValue);
               } else {
 
                 OIdentifier alias = item.getDefaultAlias();
@@ -115,7 +118,7 @@ public class OrientJdbcResultSet implements ResultSet {
                 int underscore = alias.getValue().indexOf('_');
                 if (underscore > 0) {
                   String maybeFunction = alias.getValue().substring(0, underscore);
-                  if (fc.hasFunction(maybeFunction)) {
+                  if (functionNames.contains(maybeFunction.toLowerCase())) {
                     fields.add(maybeFunction);
                   } else {
                     fields.add(alias.getValue());

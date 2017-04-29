@@ -99,7 +99,7 @@ public class OrientJdbcDatabaseMetaData implements DatabaseMetaData {
   }
 
   public String getDatabaseProductVersion() throws SQLException {
-    return OConstants.getVersion();
+    return OConstants.ORIENT_VERSION;
   }
 
   public String getDriverName() throws SQLException {
@@ -700,7 +700,7 @@ public class OrientJdbcDatabaseMetaData implements DatabaseMetaData {
       final String className = cls.getName();
       final String type;
 
-      if (OMetadata.SYSTEM_CLUSTER.contains(cls.getName()))
+      if (OMetadata.SYSTEM_CLUSTER.contains(cls.getName().toLowerCase()))
         type = "SYSTEM TABLE";
       else
         type = "TABLE";

@@ -107,6 +107,7 @@ public abstract class ODistributedAbstractPlugin extends OServerPluginAbstract
   protected       List<ODistributedLifecycleListener>            listeners                         = new ArrayList<ODistributedLifecycleListener>();
   protected final ConcurrentMap<String, ORemoteServerController> remoteServers                     = new ConcurrentHashMap<String, ORemoteServerController>();
   protected       TimerTask                                      publishLocalNodeConfigurationTask = null;
+  protected       TimerTask                                      haStatsTask                       = null;
   protected       OClusterHealthChecker                          healthCheckerTask                 = null;
   protected String coordinatorServer;
 
@@ -232,6 +233,9 @@ public abstract class ODistributedAbstractPlugin extends OServerPluginAbstract
 
     if (healthCheckerTask != null)
       healthCheckerTask.cancel();
+
+    if (haStatsTask != null)
+      haStatsTask.cancel();
 
     if (messageService != null)
       messageService.shutdown();
@@ -1282,34 +1286,38 @@ public abstract class ODistributedAbstractPlugin extends OServerPluginAbstract
   protected void backupCurrentDatabase(final String iDatabaseName) {
     Orient.instance().unregisterStorageByName(iDatabaseName);
 
-    // MOVE DIRECTORY TO ../backup/databases/<db-name>
-    final String backupDirectory = OGlobalConfiguration.DISTRIBUTED_BACKUP_DIRECTORY.getValueAsString();
-    if (backupDirectory == null || OIOUtils.getStringContent(backupDirectory).trim().isEmpty())
-      // SKIP BACKUP
+    // move directory to ../backup/databases/<db-name>
+    final String backupdirectory = OGlobalConfiguration.DISTRIBUTED_BACKUP_DIRECTORY.getValueAsString();
+    if (backupdirectory == null || OIOUtils.getStringContent(backupdirectory).trim().isEmpty())
+      // skip backup
       return;
 
-    final String backupPath = serverInstance.getDatabaseDirectory() + "/" + backupDirectory + "/" + iDatabaseName;
-    final File backupFullPath = new File(backupPath);
-    final File f = new File(backupDirectory);
+    String backuppath = backupdirectory.startsWith("/") ? backupdirectory : serverInstance.getDatabaseDirectory() + backupdirectory;
+    if (!backuppath.endsWith("/"))
+      backuppath += "/";
+    backuppath += iDatabaseName;
+
+    final File backupfullpath = new File(backuppath);
+    final File f = new File(backupdirectory);
     if (f.exists())
-      OFileUtils.deleteRecursively(backupFullPath);
+      OFileUtils.deleteRecursively(backupfullpath);
     else
       f.mkdirs();
 
-    final String dbPath = serverInstance.getDatabaseDirectory() + iDatabaseName;
+    final String dbpath = serverInstance.getDatabaseDirectory() + iDatabaseName;
 
-    // MOVE THE DATABASE ON CURRENT NODE
+    // move the database on current node
     ODistributedServerLog.warn(this, nodeName, null, DIRECTION.NONE,
-        "Moving existent database '%s' in '%s' to '%s' and get a fresh copy from a remote node...", iDatabaseName, dbPath,
-        backupPath);
+        "moving existent database '%s' in '%s' to '%s' and get a fresh copy from a remote node...", iDatabaseName, dbpath,
+        backuppath);
 
-    final File oldDirectory = new File(dbPath);
-    if (!oldDirectory.renameTo(backupFullPath)) {
+    final File olddirectory = new File(dbpath);
+    if (!olddirectory.renameTo(backupfullpath)) {
       ODistributedServerLog.error(this, nodeName, null, DIRECTION.NONE,
-          "Error on moving existent database '%s' located in '%s' to '%s'. Deleting old database...", iDatabaseName, dbPath,
-          backupFullPath);
+          "error on moving existent database '%s' located in '%s' to '%s'. deleting old database...", iDatabaseName, dbpath,
+          backupfullpath);
 
-      OFileUtils.deleteRecursively(oldDirectory);
+      OFileUtils.deleteRecursively(olddirectory);
     }
   }
 
@@ -1583,9 +1591,9 @@ public abstract class ODistributedAbstractPlugin extends OServerPluginAbstract
       // ALREADY IN LOCK
       try {
         if (ODistributedServerLog.isDebugEnabled())
-          ODistributedServerLog
-              .debug(this, nodeName, null, DIRECTION.NONE, "Current distributed configuration for database '%s': %s", databaseName,
-                  lastCfg.getDocument().toJSON());
+          ODistributedServerLog.debug(this, nodeName, null, DIRECTION.NONE,
+              "Already locked. Current distributed configuration for database '%s': %s", databaseName,
+              lastCfg.getDocument().toJSON());
 
         return (T) iCallback.call(lastCfg);
 
@@ -1593,8 +1601,8 @@ public abstract class ODistributedAbstractPlugin extends OServerPluginAbstract
 
         if (ODistributedServerLog.isDebugEnabled())
           ODistributedServerLog
-              .debug(this, nodeName, null, DIRECTION.NONE, "New distributed configuration for database '%s': %s", databaseName,
-                  lastCfg.getDocument().toJSON());
+              .debug(this, nodeName, null, DIRECTION.NONE, "Already locked. New distributed configuration for database '%s': %s",
+                  databaseName, lastCfg.getDocument().toJSON());
 
         // CONFIGURATION CHANGED, UPDATE IT ON THE CLUSTER AND DISK
         updateCachedDatabaseConfiguration(databaseName, lastCfg, true);
@@ -1606,28 +1614,30 @@ public abstract class ODistributedAbstractPlugin extends OServerPluginAbstract
 
       OScenarioThreadLocal.INSTANCE.setInDatabaseLock(true);
 
-      if (lastCfg == null)
-        // ACQUIRE CFG INSIDE THE LOCK
-        lastCfg = getDatabaseConfiguration(databaseName).modify();
-
-      if (ODistributedServerLog.isDebugEnabled())
-        ODistributedServerLog
-            .debug(this, nodeName, null, DIRECTION.NONE, "Current distributed configuration for database '%s': %s", databaseName,
-                lastCfg.getDocument().toJSON());
-
       try {
+        if (lastCfg == null)
+          // ACQUIRE CFG INSIDE THE LOCK
+          lastCfg = getDatabaseConfiguration(databaseName).modify();
 
-        return (T) iCallback.call(lastCfg);
-
-      } finally {
         if (ODistributedServerLog.isDebugEnabled())
           ODistributedServerLog
-              .debug(this, nodeName, null, DIRECTION.NONE, "New distributed configuration for database '%s': %s", databaseName,
+              .debug(this, nodeName, null, DIRECTION.NONE, "Lock acquired. Current distributed configuration for database '%s': %s", databaseName,
                   lastCfg.getDocument().toJSON());
 
-        // CONFIGURATION CHANGED, UPDATE IT ON THE CLUSTER AND DISK
-        updateCachedDatabaseConfiguration(databaseName, lastCfg, true);
+        try {
 
+          return (T) iCallback.call(lastCfg);
+
+        } finally {
+          if (ODistributedServerLog.isDebugEnabled())
+            ODistributedServerLog
+                .debug(this, nodeName, null, DIRECTION.NONE, "Lock acquired. New distributed configuration for database '%s': %s", databaseName,
+                    lastCfg.getDocument().toJSON());
+
+          // CONFIGURATION CHANGED, UPDATE IT ON THE CLUSTER AND DISK
+          updateCachedDatabaseConfiguration(databaseName, lastCfg, true);
+        }
+      } finally {
         OScenarioThreadLocal.INSTANCE.setInDatabaseLock(false);
       }
 
@@ -1637,7 +1647,22 @@ public abstract class ODistributedAbstractPlugin extends OServerPluginAbstract
       throw new RuntimeException(e);
 
     } finally {
-      lockManagerRequester.releaseExclusiveLock(databaseName, nodeName);
+      for (int retry = 0; retry < 10; ++retry)
+        try {
+          lockManagerRequester.releaseExclusiveLock(databaseName, nodeName);
+          // RELEASED
+          break;
+        } catch (Throwable t) {
+          // ERROR: RETRY IN A BIT
+          ODistributedServerLog.error(this, nodeName, databaseName, DIRECTION.OUT,
+              "Cannot release distributed lock against database '%s' coordinator server '%s' (error: %s)", databaseName,
+              lockManagerRequester.getCoordinatorServer(), t);
+          try {
+            Thread.sleep(100);
+          } catch (InterruptedException e) {
+            break;
+          }
+        }
     }
   }
 

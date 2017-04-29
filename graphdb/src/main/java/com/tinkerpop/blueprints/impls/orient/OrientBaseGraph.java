@@ -25,8 +25,6 @@ import com.orientechnologies.common.exception.OException;
 import com.orientechnologies.common.io.OFileUtils;
 import com.orientechnologies.common.log.OLogManager;
 import com.orientechnologies.common.util.OCallable;
-import com.orientechnologies.common.util.OPair;
-import com.orientechnologies.orient.client.remote.OStorageRemote;
 import com.orientechnologies.orient.core.OOrientListenerAbstract;
 import com.orientechnologies.orient.core.Orient;
 import com.orientechnologies.orient.core.command.OCommandRequest;
@@ -68,7 +66,6 @@ import java.net.URLEncoder;
 import java.util.*;
 import java.util.logging.Level;
 
-
 /**
  * A Blueprints implementation of the graph database OrientDB (http://www.orientechnologies.com)
  *
@@ -82,6 +79,7 @@ public abstract class OrientBaseGraph extends OrientConfigurableGraph implements
   public static final     String                              ADMIN               = "admin";
   private static volatile ThreadLocal<OrientBaseGraph>        activeGraph         = new ThreadLocal<OrientBaseGraph>();
   private static volatile ThreadLocal<Deque<OrientBaseGraph>> initializationStack = new InitializationStackThreadLocal();
+  private Map<String, Object> properties;
 
   static {
     Orient.instance().registerListener(new OOrientListenerAbstract() {
@@ -1939,9 +1937,11 @@ public abstract class OrientBaseGraph extends OrientConfigurableGraph implements
     if (pool == null) {
       database = new ODatabaseDocumentTx(url);
 
-      final String connMode = settings.getConnectionStrategy();
-      getDatabase().setProperty(OStorageRemote.PARAM_CONNECTION_STRATEGY, connMode);
-
+      if (properties != null) {
+        for (Map.Entry<String, Object> entry : properties.entrySet()) {
+          database.setProperty(entry.getKey(), entry.getValue());
+        }
+      }
       if (getDatabase().getStorage().getUnderlying() instanceof OAbstractPaginatedStorage)
         ((OAbstractPaginatedStorage) getDatabase().getStorage().getUnderlying()).registerRecoverListener(this);
 
@@ -2029,35 +2029,39 @@ public abstract class OrientBaseGraph extends OrientConfigurableGraph implements
       final ORidBag bag = (ORidBag) fieldValue;
 
       if (iVertexToRemove != null) {
-        // SEARCH SEQUENTIALLY (SLOWER)
-        for (Iterator<OIdentifiable> it = bag.rawIterator(); it.hasNext(); ) {
-          final ODocument curr = getDocument(it.next(), forceReload);
+        if (!iAlsoInverse && ODocumentInternal.getImmutableSchemaClass((ODocument) iVertexToRemove.getRecord()).isEdgeType()) {
+          bag.remove(iVertexToRemove);
+        } else {
+          // SEARCH SEQUENTIALLY (SLOWER)
+          for (Iterator<OIdentifiable> it = bag.rawIterator(); it.hasNext(); ) {
+            final ODocument curr = getDocument(it.next(), forceReload);
 
-          if (curr == null)
-            // EDGE REMOVED
-            continue;
+            if (curr == null)
+              // EDGE REMOVED
+              continue;
 
-          if (curr == null)
-            // ALREADY DELETED (BYPASSING GRAPH API?), JUST REMOVE THE REFERENCE FROM BAG
-            it.remove();
-          else if (iVertexToRemove.equals(curr)) {
-            // FOUND AS VERTEX
-            it.remove();
-            if (iAlsoInverse)
-              removeInverseEdge(graph, iVertex, iFieldName, iVertexToRemove, curr, useVertexFieldsForEdgeLabels, autoScaleEdgeType,
-                  forceReload);
-            break;
-
-          } else if (ODocumentInternal.getImmutableSchemaClass(curr).isEdgeType()) {
-            final Direction direction = OrientVertex.getConnectionDirection(iFieldName, useVertexFieldsForEdgeLabels);
-
-            // EDGE, REMOVE THE EDGE
-            if (iVertexToRemove.equals(OrientEdge.getConnection(curr, direction.opposite()))) {
+            if (curr == null)
+              // ALREADY DELETED (BYPASSING GRAPH API?), JUST REMOVE THE REFERENCE FROM BAG
+              it.remove();
+            else if (iVertexToRemove.equals(curr)) {
+              // FOUND AS VERTEX
               it.remove();
               if (iAlsoInverse)
                 removeInverseEdge(graph, iVertex, iFieldName, iVertexToRemove, curr, useVertexFieldsForEdgeLabels,
                     autoScaleEdgeType, forceReload);
               break;
+
+            } else if (ODocumentInternal.getImmutableSchemaClass(curr).isEdgeType()) {
+              final Direction direction = OrientVertex.getConnectionDirection(iFieldName, useVertexFieldsForEdgeLabels);
+
+              // EDGE, REMOVE THE EDGE
+              if (iVertexToRemove.equals(OrientEdge.getConnection(curr, direction.opposite()))) {
+                it.remove();
+                if (iAlsoInverse)
+                  removeInverseEdge(graph, iVertex, iFieldName, iVertexToRemove, curr, useVertexFieldsForEdgeLabels,
+                      autoScaleEdgeType, forceReload);
+                break;
+              }
             }
           }
         }
@@ -2138,6 +2142,7 @@ public abstract class OrientBaseGraph extends OrientConfigurableGraph implements
   /**
    * (Internal only)
    */
+
   private static void removeInverseEdge(final OrientBaseGraph graph, final ODocument iVertex, final String iFieldName,
       final OIdentifiable iVertexToRemove, final OIdentifiable currentRecord, final boolean useVertexFieldsForEdgeLabels,
       final boolean autoScaleEdgeType, boolean forceReload) {
@@ -2217,6 +2222,10 @@ public abstract class OrientBaseGraph extends OrientConfigurableGraph implements
     }
   }
 
+  public OIntent getIntent() {
+    return getDatabase().getActiveIntent();
+  }
+
   protected OrientVertex getVertexInstance(final OIdentifiable id) {
     return new OrientVertex(this, id);
   }
@@ -2235,5 +2244,26 @@ public abstract class OrientBaseGraph extends OrientConfigurableGraph implements
 
   protected OrientEdge getEdgeInstance(final OIdentifiable from, final OIdentifiable to, final String label) {
     return new OrientEdge(this, from, to, label);
+  }
+
+  @Override
+  protected Object setProperty(String iName, Object iValue) {
+    if (properties == null)
+      properties = new HashMap<String, Object>();
+
+    return properties.put(iName, iValue);
+  }
+
+  @Override
+  protected Object getProperty(String iName) {
+    if (properties == null) {
+      return null;
+    }
+    return properties.get(iName);
+  }
+
+  @Override
+  public Map<String, Object> getProperties() {
+    return properties;
   }
 }

@@ -133,17 +133,15 @@ public abstract class OAbstractPaginatedStorage extends OStorageAbstract
 
   private volatile int defaultClusterId = -1;
   protected volatile OAtomicOperationsManager atomicOperationsManager;
-  private volatile boolean                  wereNonTxOperationsPerformedInPreviousOpen = false;
-  private volatile OLowDiskSpaceInformation lowDiskSpace                               = null;
-  private volatile boolean                  checkpointRequest                          = false;
+  private volatile OLowDiskSpaceInformation lowDiskSpace      = null;
+  private volatile boolean                  checkpointRequest = false;
 
   private volatile Throwable dataFlushException = null;
 
   private final int id;
 
-  private Map<String, OIndexEngine> indexEngineNameMap        = new HashMap<String, OIndexEngine>();
-  private List<OIndexEngine>        indexEngines              = new ArrayList<OIndexEngine>();
-  private boolean                   wereDataRestoredAfterOpen = false;
+  private Map<String, OIndexEngine> indexEngineNameMap = new HashMap<String, OIndexEngine>();
+  private List<OIndexEngine>        indexEngines       = new ArrayList<OIndexEngine>();
 
   private volatile long fullCheckpointCount;
 
@@ -502,9 +500,10 @@ public abstract class OAbstractPaginatedStorage extends OStorageAbstract
       // ADD THE DEFAULT CLUSTER
       defaultClusterId = doAddCluster(CLUSTER_DEFAULT_NAME, null);
 
-      clearStorageDirty();
       if (OGlobalConfiguration.STORAGE_MAKE_FULL_CHECKPOINT_AFTER_CREATE.getValueAsBoolean())
         makeFullCheckpoint();
+
+      clearStorageDirty();
 
       writeCache.startFuzzyCheckpoints();
       postCreateSteps();
@@ -2526,14 +2525,6 @@ public abstract class OAbstractPaginatedStorage extends OStorageAbstract
     return false;
   }
 
-  public boolean wereDataRestoredAfterOpen() {
-    return wereDataRestoredAfterOpen;
-  }
-
-  public boolean wereNonTxOperationsPerformedInPreviousOpen() {
-    return wereNonTxOperationsPerformedInPreviousOpen;
-  }
-
   public void reload() {
     close();
     open(null, null, null);
@@ -2868,6 +2859,20 @@ public abstract class OAbstractPaginatedStorage extends OStorageAbstract
     return false;
   }
 
+  public boolean isIndexRebuildScheduled() {
+    return false;
+  }
+
+  protected boolean isIndexRebuildScheduledInternal() {
+    return false;
+  }
+
+  protected void scheduleIndexRebuild() throws IOException {
+  }
+
+  public void cancelIndexRebuild() throws IOException {
+  }
+
   private ORawBuffer readRecordIfNotLatest(final OCluster cluster, final ORecordId rid, final int recordVersion)
       throws ORecordNotFoundException {
     checkOpeness();
@@ -2994,7 +2999,7 @@ public abstract class OAbstractPaginatedStorage extends OStorageAbstract
     if (isDirty()) {
       OLogManager.instance().warn(this, "Storage '" + name + "' was not closed properly. Will try to recover from write ahead log");
       try {
-        wereDataRestoredAfterOpen = restoreFromWAL() != null;
+        restoreFromWAL();
 
         if (recoverListener != null)
           recoverListener.onStorageRecover();
@@ -3159,23 +3164,29 @@ public abstract class OAbstractPaginatedStorage extends OStorageAbstract
       final OCluster cluster, final byte recordType) {
 
     try {
+      final int recycledVersion = version < -2 ? ORecordVersionHelper.clearRollbackMode(version) : version;
+
       makeStorageDirty();
       atomicOperationsManager.startAtomicOperation((String) null, true);
       try {
-        cluster.recycleRecord(rid.getClusterPosition(), content, version, recordType);
+        // correct version in case of distributed fix tasks before recycling the storage entry
+        cluster.recycleRecord(rid.getClusterPosition(), content, recycledVersion, recordType);
 
         final ORecordSerializationContext context = ORecordSerializationContext.getContext();
         if (context != null)
           context.executeOperations(this);
         atomicOperationsManager.endAtomicOperation(false, null, (String) null);
+
+      } catch (RuntimeException e) {
+        atomicOperationsManager.endAtomicOperation(true, e, (String) null);
+        throw e;
       } catch (Exception e) {
         atomicOperationsManager.endAtomicOperation(true, e, (String) null);
 
         OLogManager.instance().error(this, "Error on recycling record " + rid + " (cluster: " + cluster + ")", e);
 
-        final int recordVersion = -1;
-
-        return new OStorageOperationResult<Integer>(recordVersion);
+        throw OException
+            .wrapException(new OStorageException("Error on recycling record " + rid + " (cluster: " + cluster + ")"), e);
       }
 
       if (OLogManager.instance().isDebugEnabled())
@@ -3183,14 +3194,12 @@ public abstract class OAbstractPaginatedStorage extends OStorageAbstract
 
       recordRecycled.incrementAndGet();
 
-      return new OStorageOperationResult<Integer>(version, content, false);
+      return new OStorageOperationResult<Integer>(recycledVersion, content, false);
 
     } catch (IOException ioe) {
       OLogManager.instance().error(this, "Error on recycling record " + rid + " (cluster: " + cluster + ")", ioe);
-
-      final int recordVersion = -1;
-
-      return new OStorageOperationResult<Integer>(recordVersion);
+      throw OException
+          .wrapException(new OStorageException("Error on recycling record " + rid + " (cluster: " + cluster + ")"), ioe);
     }
   }
 
@@ -3914,9 +3923,9 @@ public abstract class OAbstractPaginatedStorage extends OStorageAbstract
 
           operationList.add(operationUnitRecord);
         } else if (walRecord instanceof ONonTxOperationPerformedWALRecord) {
-          if (!wereNonTxOperationsPerformedInPreviousOpen) {
+          if (!isIndexRebuildScheduledInternal()) {
             OLogManager.instance().warn(this, "Non tx operation was used during data modification we will need index rebuild.");
-            wereNonTxOperationsPerformedInPreviousOpen = true;
+            scheduleIndexRebuild();
           }
         } else
           OLogManager.instance().warn(this, "Record %s will be skipped during data restore", walRecord);
